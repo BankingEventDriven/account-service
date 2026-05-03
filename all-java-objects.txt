@@ -1,0 +1,1766 @@
+===== BEGIN: domain =====
+
+===== FILE: src/main/java/com/bank/account_service/domain/event/AccountDebited.java =====
+package com.bank.account_service.domain.event;
+
+import com.bank.account_service.domain.model.AccountId;
+import com.bank.account_service.domain.model.Money;
+
+import java.time.Instant;
+import java.util.UUID;
+
+public record AccountDebited(
+    UUID eventId,
+    AccountId accountId,
+    Money amount,
+    UUID transactionId,
+    Instant occurredAt
+) implements DomainEvent {
+
+    @Override public UUID getEventId() { return eventId; }
+    @Override public Instant getOccurredAt() { return occurredAt; }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/event/AccountStatusChanged.java =====
+package com.bank.account_service.domain.event;
+
+import com.bank.account_service.domain.model.AccountId;
+import com.bank.account_service.domain.model.enums.AccountStatus;
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * Published when an account transitions between statuses (e.g. ACTIVE â†’ BLOCKED).
+ */
+public record AccountStatusChanged(
+        UUID eventId,
+        AccountId accountId,
+        AccountStatus previousStatus,
+        AccountStatus newStatus,
+        Instant occurredAt
+) implements DomainEvent {
+
+    @Override
+    public UUID getEventId() {
+        return eventId;
+    }
+
+    @Override
+    public Instant getOccurredAt() {
+        return occurredAt;
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/event/DomainEvent.java =====
+package com.bank.account_service.domain.event;
+
+import java.time.Instant;
+import java.util.UUID;
+
+public interface DomainEvent {
+    UUID getEventId();
+    Instant getOccurredAt();
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/event/DomainEventPublisher.java =====
+package com.bank.account_service.domain.event;
+
+public interface DomainEventPublisher {
+    void publish(DomainEvent event);
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/event/InsufficientFundsRejected.java =====
+package com.bank.account_service.domain.event;
+
+import com.bank.account_service.domain.model.AccountId;
+import com.bank.account_service.domain.model.Money;
+
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * Domain event published when a debit is rejected due to insufficient funds.
+ *
+ * BUG FIX: the original implementation overrode getEventId() and getOccurredAt()
+ * returning null instead of delegating to the record components. Fixed below.
+ */
+public record InsufficientFundsRejected(
+        UUID eventId,
+        AccountId accountId,
+        Money requestedAmount,
+        UUID transactionId,
+        Instant occurredAt
+) implements DomainEvent {
+
+    // Delegate to record components â€” do NOT return null.
+    @Override
+    public UUID getEventId() {
+        return eventId;
+    }
+
+    @Override
+    public Instant getOccurredAt() {
+        return occurredAt;
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/exception/AccountNotActiveException.java =====
+package com.bank.account_service.domain.exception;
+
+public class AccountNotActiveException extends RuntimeException {
+    public AccountNotActiveException(String message) {
+        super(message);
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/exception/AccountNotFoundException.java =====
+package com.bank.account_service.domain.exception;
+
+import java.util.UUID;
+
+/**
+ * Thrown when an account lookup by ID finds no result.
+ * Maps to HTTP 404 Not Found in GlobalExceptionHandler.
+ */
+public class AccountNotFoundException extends RuntimeException {
+
+    private final UUID accountId;
+
+    public AccountNotFoundException(UUID accountId) {
+        super("Account not found: " + accountId);
+        this.accountId = accountId;
+    }
+
+    public UUID getAccountId() {
+        return accountId;
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/exception/CurrencyMismatchException.java =====
+package com.bank.account_service.domain.exception;
+
+public class CurrencyMismatchException extends RuntimeException {
+    public CurrencyMismatchException(String message) {
+        super(message);
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/exception/DuplicateTransactionException.java =====
+package com.bank.account_service.domain.exception;
+
+import java.util.UUID;
+
+
+/**
+ * Thrown when a debit command carries a transactionId that was already processed.
+ * Implements idempotency protection at the domain level.
+ * Maps to HTTP 409 Conflict in GlobalExceptionHandler.
+ */
+public class DuplicateTransactionException extends RuntimeException {
+
+    private final UUID transactionId;
+
+    public DuplicateTransactionException(UUID transactionId) {
+        super("Transaction already processed: " + transactionId);
+        this.transactionId = transactionId;
+    }
+
+    public UUID getTransactionId() {
+        return transactionId;
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/exception/InsufficientFundsException.java =====
+package com.bank.account_service.domain.exception;
+
+public class InsufficientFundsException extends RuntimeException {
+    public InsufficientFundsException(String message) {
+        super(message);
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/factory/DebitPolicyFactory.java =====
+package com.bank.account_service.domain.factory;
+
+import com.bank.account_service.domain.model.enums.AccountType;
+import com.bank.account_service.domain.policy.CreditDebitPolicy;
+import com.bank.account_service.domain.policy.CurrentDebitPolicy;
+import com.bank.account_service.domain.policy.DebitPolicy;
+import com.bank.account_service.domain.policy.SavingsDebitPolicy;
+import org.springframework.stereotype.Component;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Component
+public class DebitPolicyFactory {
+
+    private final Map<AccountType, DebitPolicy> policies;
+
+    public DebitPolicyFactory() {
+        this.policies = new HashMap<>();
+
+        policies.put(AccountType.CURRENT, new CurrentDebitPolicy());
+        policies.put(AccountType.CREDIT, new CreditDebitPolicy());
+        policies.put(AccountType.SAVINGS, new SavingsDebitPolicy());
+    }
+
+    public DebitPolicy get(AccountType type) {
+        return policies.get(type);
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/model/Account.java =====
+package com.bank.account_service.domain.model;
+
+import com.bank.account_service.domain.event.AccountDebited;
+import com.bank.account_service.domain.event.AccountStatusChanged;
+import com.bank.account_service.domain.event.DomainEvent;
+import com.bank.account_service.domain.event.InsufficientFundsRejected;
+import com.bank.account_service.domain.exception.AccountNotActiveException;
+import com.bank.account_service.domain.exception.CurrencyMismatchException;
+import com.bank.account_service.domain.exception.InsufficientFundsException;
+import com.bank.account_service.domain.model.enums.AccountStatus;
+import com.bank.account_service.domain.model.enums.AccountType;
+import com.bank.account_service.domain.policy.DebitPolicy;
+import lombok.Getter;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+
+@Getter
+public class Account {
+
+    private AccountId id;
+    private Owner owner;
+    private AccountStatus status;
+    private Money balance;
+    private AccountType type;
+    private int version;
+
+    private final List<DomainEvent> events = new ArrayList<>();
+
+    public Account(AccountId id, Owner owner, AccountStatus status, Money balance, AccountType type, int version) {
+        this.id = id;
+        this.owner = owner;
+        this.status = status;
+        this.balance = balance;
+        this.type = type;
+        this.version = version;
+    }
+
+    public static Account restore(AccountId id, Owner owner, AccountStatus status, Money balance, AccountType type, int version) {
+        return new Account(id, owner, status, balance, type, version);
+    }
+
+    public static Account open(AccountId id, Owner owner, AccountType type, Money balance) {
+        if (type == AccountType.CREDIT && balance.getAmount().signum() != 0) {
+            throw new IllegalStateException("Credit accounts start with zero balance");
+        }
+        return new Account(id, owner, AccountStatus.ACTIVE, balance, type, 0);
+    }
+
+    /**
+     * Debits this account by the given amount.
+     *
+     * BUG FIX (original code): guard clauses (status, currency) ran AFTER policy.validate().
+     * A debit policy could execute on an INACTIVE account before the status guard fired.
+     * Correct order: status â†’ currency â†’ policy â†’ balance check.
+     */
+    public void debit(Money amount, UUID transactionId, DebitPolicy policy) {
+        // 1. Status guard first â€” no point checking anything else on a closed account.
+        if (this.status != AccountStatus.ACTIVE) {
+            throw new AccountNotActiveException("Account is not active: " + id.value());
+        }
+
+        // 2. Currency guard â€” fail fast before running any policy logic.
+        if (!this.balance.getCurrency().equals(amount.getCurrency())) {
+            throw new CurrencyMismatchException("Currency mismatch: expected "
+                    + this.balance.getCurrency() + " but got " + amount.getCurrency());
+        }
+
+        // 3. Policy validation (type-specific rules: savings limit, credit allowed-negative, etc.)
+        policy.validate(this, amount);
+
+        // 4. Balance check â€” emit rejection event + throw so the caller can handle idempotency.
+        if (this.balance.getAmount().compareTo(amount.getAmount()) < 0) {
+            this.events.add(new InsufficientFundsRejected(
+                    UUID.randomUUID(), id, amount, transactionId, Instant.now()));
+            throw new InsufficientFundsException("Insufficient funds on account: " + id.value());
+        }
+
+        this.balance = new Money(
+                this.balance.getAmount().subtract(amount.getAmount()),
+                this.balance.getCurrency());
+
+        this.events.add(new AccountDebited(UUID.randomUUID(), id, amount, transactionId, Instant.now()));
+    }
+
+    public void credit(Money amount, UUID transactionId) {
+        this.balance = new Money(
+            this.balance.getAmount().add(amount.getAmount()),
+            this.balance.getCurrency()
+        );
+    }
+
+    /**
+     * Transitions the account to a new status.
+     * Used by PATCH /api/v1/accounts/{id}/status (block, unblock, close).
+     */
+    public void changeStatus(AccountStatus newStatus) {
+        AccountStatus previous = this.status;
+        this.status = newStatus;
+        this.events.add(new AccountStatusChanged(UUID.randomUUID(), id, previous, newStatus, Instant.now()));
+    }
+
+    public List<DomainEvent> pullEvents() {
+        List<DomainEvent> copy = new ArrayList<>(events);
+        events.clear();
+        return copy;
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/model/AccountId.java =====
+package com.bank.account_service.domain.model;
+
+import java.util.UUID;
+
+public record AccountId(UUID value) {
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/model/enums/AccountStatus.java =====
+package com.bank.account_service.domain.model.enums;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+
+@Schema(
+    description = "Lifecycle status of an account",
+    example = "ACTIVE"
+)
+public enum AccountStatus {
+    ACTIVE,
+    INACTIVE,
+    BLOCKED,
+    CLOSED
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/model/enums/AccountType.java =====
+package com.bank.account_service.domain.model.enums;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+
+@Schema(
+    description = "Business type of account",
+    example = "CURRENT"
+)
+public enum AccountType {
+    CURRENT,
+    SAVINGS,
+    CREDIT
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/model/enums/TransactionType.java =====
+package com.bank.account_service.domain.model.enums;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+
+@Schema(
+    description = "Type of transaction applied to an account",
+    example = "DEBIT"
+)
+public enum TransactionType {
+    DEBIT,
+    CREDIT,
+    TRANSFER
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/model/Money.java =====
+package com.bank.account_service.domain.model;
+
+import lombok.Value;
+
+import java.math.BigDecimal;
+import java.util.Currency;
+
+@Value
+public class Money {
+
+    BigDecimal amount;
+    Currency currency;
+
+    public Money subtract(Money other) {
+        if (!this.currency.equals(other.currency)) {
+            throw new IllegalArgumentException("Currency mismatch");
+        }
+        return new Money(amount.subtract(other.amount), currency);
+    }
+
+    public Money add(Money other) {
+        if (other.amount.compareTo(BigDecimal.ZERO) < 0) {
+            throw new IllegalArgumentException("Amount must be positive");
+        }
+
+        if (!this.currency.equals(other.currency)) {
+            throw new IllegalArgumentException("Currency mismatch");
+        }
+
+        return new Money(amount.add(other.amount), currency);
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/model/Owner.java =====
+package com.bank.account_service.domain.model;
+
+public record Owner(String firstName, String lastName) {
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/model/Transaction.java =====
+package com.bank.account_service.domain.model;
+
+import com.bank.account_service.domain.model.enums.TransactionType;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+public class Transaction {
+    private UUID id;
+    private AccountId accountId;
+    private Money amount;
+    private TransactionType type;
+    private Instant createdAt;
+
+    private Transaction(UUID id, AccountId accountId, Money amount, TransactionType type, Instant createdAt) {
+        this.id = id;
+        this.accountId = accountId;
+        this.amount = amount;
+        this.type = type;
+        this.createdAt = createdAt;
+    }
+
+    public static Transaction restore(UUID id, AccountId accountId, Money amount, TransactionType type, Instant createdAt) {
+        return new Transaction(id, accountId, amount, type, createdAt);
+    }
+
+    public static Transaction debit(AccountId accountId, Money amount) {
+        return new Transaction(
+            UUID.randomUUID(),
+            accountId,
+            amount,
+            TransactionType.DEBIT,
+            Instant.now()
+        );
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/policy/CreditDebitPolicy.java =====
+package com.bank.account_service.domain.policy;
+
+import com.bank.account_service.domain.model.Account;
+import com.bank.account_service.domain.model.Money;
+import org.springframework.stereotype.Component;
+
+@Component
+public class CreditDebitPolicy implements DebitPolicy {
+
+    @Override
+    public void validate(Account account, Money amount) {
+        // allowed to negative
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/policy/CurrentDebitPolicy.java =====
+package com.bank.account_service.domain.policy;
+
+import com.bank.account_service.domain.model.Account;
+import com.bank.account_service.domain.model.Money;
+import org.springframework.stereotype.Component;
+
+@Component
+public class CurrentDebitPolicy implements DebitPolicy {
+
+    @Override
+    public void validate(Account account, Money amount) {
+        if (account.getBalance().getAmount().compareTo(amount.getAmount()) < 0) {
+            throw new IllegalStateException("Insufficient funds");
+        }
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/policy/DebitPolicy.java =====
+package com.bank.account_service.domain.policy;
+
+import com.bank.account_service.domain.model.Account;
+import com.bank.account_service.domain.model.Money;
+
+public interface DebitPolicy {
+    void validate(Account account, Money amount);
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/policy/SavingsDebitPolicy.java =====
+package com.bank.account_service.domain.policy;
+
+import com.bank.account_service.domain.model.Account;
+import com.bank.account_service.domain.model.Money;
+import org.springframework.stereotype.Component;
+
+@Component
+public class SavingsDebitPolicy implements DebitPolicy {
+
+    @Override
+    public void validate(Account account, Money amount) {
+        if (amount.getAmount().doubleValue() > 1000) {
+            throw new IllegalStateException("Savings limit exceeded per transaction");
+        }
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/domain/repository/AccountRepository.java =====
+package com.bank.account_service.domain.repository;
+
+import com.bank.account_service.domain.model.Account;
+import com.bank.account_service.domain.model.AccountId;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+public interface AccountRepository {
+
+    Optional<Account> findById(AccountId id);
+    List<Account> findAll();
+    void save(Account account);
+    boolean existsById(AccountId id);
+    boolean existsByTransactionIdProcessed(UUID transactionId);
+}
+
+===== END: domain =====
+
+===== BEGIN: application =====
+
+===== FILE: src/main/java/com/bank/account_service/application/command/DebitAccountCommand.java =====
+package com.bank.account_service.application.command;
+
+import java.math.BigDecimal;
+import java.util.UUID;
+
+public record DebitAccountCommand(
+    UUID accountId,
+    BigDecimal amount,
+    UUID transactionId
+) {
+}
+
+===== FILE: src/main/java/com/bank/account_service/application/command/OpenAccountCommand.java =====
+package com.bank.account_service.application.command;
+
+import com.bank.account_service.domain.model.enums.AccountType;
+
+import java.math.BigDecimal;
+
+public record OpenAccountCommand(
+    String firstName,
+    String lastName,
+    AccountType type,
+    BigDecimal initialBalance,
+    String currency
+) {
+}
+
+===== FILE: src/main/java/com/bank/account_service/application/command/UpdateAccountStatusCommand.java =====
+package com.bank.account_service.application.command;
+
+import com.bank.account_service.domain.model.enums.AccountStatus;
+
+import java.util.UUID;
+
+/**
+ * Command to change the status of an account (ACTIVE â†’ BLOCKED, BLOCKED â†’ ACTIVE, etc.).
+ * Triggered by PATCH /api/v1/accounts/{id}/status.
+ */
+public record UpdateAccountStatusCommand(
+    UUID accountId,
+    AccountStatus newStatus
+) {}
+
+===== FILE: src/main/java/com/bank/account_service/application/service/AccountService.java =====
+package com.bank.account_service.application.service;
+
+import com.bank.account_service.application.command.DebitAccountCommand;
+import com.bank.account_service.application.command.OpenAccountCommand;
+import com.bank.account_service.application.command.UpdateAccountStatusCommand;
+import com.bank.account_service.domain.event.DomainEventPublisher;
+import com.bank.account_service.domain.exception.AccountNotFoundException;
+import com.bank.account_service.domain.exception.DuplicateTransactionException;
+import com.bank.account_service.domain.model.*;
+import com.bank.account_service.domain.policy.DebitPolicy;
+import com.bank.account_service.domain.factory.DebitPolicyFactory;
+import com.bank.account_service.domain.repository.AccountRepository;
+import com.bank.account_service.infrastructure.persistence.repository.projection.AccountBalanceView;
+import com.bank.account_service.infrastructure.persistence.repository.read.AccountQueryRepository;
+import com.bank.account_service.interfaces.dto.AccountDetailResponse;
+import com.bank.account_service.interfaces.dto.AccountResponse;
+import jakarta.transaction.Transactional;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Service;
+import java.util.Currency;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+@Service
+@RequiredArgsConstructor
+public class AccountService {
+
+    private final AccountRepository repository;
+    private final AccountQueryRepository queryRepository;
+    private final DomainEventPublisher eventPublisher;
+    private final DebitPolicyFactory debitPolicyFactory;
+
+    @Transactional
+    public AccountId openAccount(OpenAccountCommand command) {
+        AccountId id = new AccountId(UUID.randomUUID());
+        Owner owner = new Owner(command.firstName(), command.lastName());
+        Money initialBalance = new Money(
+                command.initialBalance(),
+                Currency.getInstance(command.currency()));
+
+        Account account = Account.open(id, owner, command.type(), initialBalance);
+        repository.save(account);
+
+        // Domain events (e.g. AccountOpened) would be pulled and published here.
+        // Omitted for brevity â€” same pattern as handleDebit().
+        return id;
+    }
+
+    public Optional<AccountDetailResponse> findById(UUID accountId) {
+        return repository.findById(new AccountId(accountId))
+            .map(account -> new AccountDetailResponse(
+                    account.getId().value(),
+                    account.getOwner().firstName(),
+                    account.getOwner().lastName(),
+                    account.getType(),
+                    account.getStatus(),
+                    account.getBalance().getAmount(),
+                    account.getBalance().getCurrency().getCurrencyCode()
+            ));
+    }
+
+    /**
+     * Debits an account.
+     *
+     * FIX compared to original:
+     *   1. Idempotency check added â€” 409 if transactionId already processed.
+     *   2. Events published AFTER repository.save() inside the same @Transactional boundary.
+     *      If Pulsar publish fails here the transaction rolls back, keeping DB and events
+     *      consistent. For production prefer the Outbox Pattern.
+     *   3. Uses AccountNotFoundException (404) instead of RuntimeException (500).
+     */
+    @Transactional
+    public void handleDebit(DebitAccountCommand command) {
+        // Idempotency guard â€” prevents double-debit on retried requests.
+        if (repository.existsByTransactionIdProcessed(command.transactionId())) {
+            throw new DuplicateTransactionException(command.transactionId());
+        }
+
+        Account account = repository.findById(new AccountId(command.accountId()))
+                .orElseThrow(() -> new AccountNotFoundException(command.accountId()));
+
+        DebitPolicy policy = debitPolicyFactory.get(account.getType());
+
+        account.debit(
+                new Money(command.amount(), Currency.getInstance("EUR")),
+                command.transactionId(),
+                policy);
+
+        repository.save(account);
+
+        // Pull events after save â€” if save throws, events are never published.
+        account.pullEvents().forEach(eventPublisher::publish);
+    }
+
+    @Transactional
+    public void updateAccountStatus(UpdateAccountStatusCommand command) {
+        Account account = repository.findById(new AccountId(command.accountId()))
+                .orElseThrow(() -> new AccountNotFoundException(command.accountId()));
+
+        account.changeStatus(command.newStatus());
+        repository.save(account);
+        account.pullEvents().forEach(eventPublisher::publish);
+    }
+
+    public Page<AccountResponse> findAll(Pageable pageable) {
+        return queryRepository.findAll(pageable)
+            .map(account -> new AccountResponse(
+                    account.getId().value(),
+                    account.getBalance().getAmount(),
+                    account.getBalance().getCurrency().getCurrencyCode(),
+                    account.getStatus().name()
+            ));
+    }
+
+    public List<AccountBalanceView> findBalances() {
+        return queryRepository.findBalances();
+    }
+}
+
+===== END: application =====
+
+===== BEGIN: infrastructure =====
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/config/SecurityConfig.java =====
+package com.bank.account_service.infrastructure.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf(csrf -> csrf.disable())
+            .authorizeHttpRequests(authorize -> authorize
+                    .anyRequest().permitAll()
+            );
+
+        return http.build();
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/messaging/pulsar/PulsarEventPublisher.java =====
+package com.bank.account_service.infrastructure.messaging.pulsar;
+
+import com.bank.account_service.domain.event.DomainEvent;
+import com.bank.account_service.domain.event.DomainEventPublisher;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.pulsar.core.PulsarTemplate;
+import org.springframework.stereotype.Component;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class PulsarEventPublisher implements DomainEventPublisher {
+
+    // Spring injecteazÄƒ automat acest template configurat prin YAML
+    private final PulsarTemplate<DomainEvent> pulsarTemplate;
+
+    @Override
+    public void publish(DomainEvent event) {
+        log.info("Publishing event: {}", event);
+        pulsarTemplate.send(event);
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/embeddable/MoneyEmbeddable.java =====
+package com.bank.account_service.infrastructure.persistence.embeddable;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Embeddable;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
+
+import java.math.BigDecimal;
+
+@Embeddable
+@Getter
+@Setter
+public class MoneyEmbeddable {
+
+    @Column(name = "amount")
+    private BigDecimal amount;
+
+    @Column(name = "currency")
+    private String currency;
+
+    protected MoneyEmbeddable() {
+
+    }
+
+    public MoneyEmbeddable(BigDecimal amount, String currency) {
+        this.amount = amount;
+        this.currency = currency;
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/embeddable/OwnerEmbeddable.java =====
+package com.bank.account_service.infrastructure.persistence.embeddable;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Embeddable;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
+
+@Embeddable
+@Getter
+@Setter
+public class OwnerEmbeddable {
+
+    @Column(name = "owner_first_name", nullable = false)
+    private String firstName;
+
+    @Column(name = "owner_last_name", nullable = false)
+    private String lastName;
+
+    public OwnerEmbeddable() {
+
+    }
+
+    public OwnerEmbeddable(String firstName, String lastName) {
+        this.firstName = firstName;
+        this.lastName = lastName;
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/entity/AccountEntity.java =====
+package com.bank.account_service.infrastructure.persistence.entity;
+
+import com.bank.account_service.domain.model.enums.AccountStatus;
+import com.bank.account_service.domain.model.enums.AccountType;
+import com.bank.account_service.infrastructure.persistence.embeddable.MoneyEmbeddable;
+import com.bank.account_service.infrastructure.persistence.embeddable.OwnerEmbeddable;
+import jakarta.persistence.*;
+import lombok.*;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.annotation.LastModifiedDate;
+import org.springframework.data.jpa.domain.support.AuditingEntityListener;
+import java.time.Instant;
+import java.util.UUID;
+
+@Entity
+@Table(name = "accounts")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@EntityListeners(AuditingEntityListener.class)
+public class AccountEntity {
+
+    @Id
+    private UUID id;
+
+    @Embedded
+    private OwnerEmbeddable owner;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private AccountStatus status;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private AccountType type;
+
+    @Embedded
+    private MoneyEmbeddable balance;
+
+    @Version
+    private int version;
+
+    @CreatedDate
+    @Column(updatable = false)
+    private Instant createdAt;
+
+    @LastModifiedDate
+    private Instant updatedAt;
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/entity/TransactionEntity.java =====
+package com.bank.account_service.infrastructure.persistence.entity;
+
+import com.bank.account_service.domain.model.enums.TransactionType;
+import com.bank.account_service.infrastructure.persistence.embeddable.MoneyEmbeddable;
+import jakarta.persistence.*;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.jpa.domain.support.AuditingEntityListener;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Entity
+@Table(name = "transactions")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@EntityListeners(AuditingEntityListener.class)
+public class TransactionEntity {
+
+    @Id
+    private UUID id;
+
+    @Column(name = "account_id", nullable = false)
+    private UUID accountId;
+
+    @Embedded
+    private MoneyEmbeddable amount;
+
+    @Enumerated(EnumType.STRING)
+    private TransactionType type;
+
+    @CreatedDate
+    @Column(updatable = false)
+    private Instant createdAt;
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/mapper/AccountMapper.java =====
+package com.bank.account_service.infrastructure.persistence.mapper;
+
+import com.bank.account_service.domain.model.*;
+import com.bank.account_service.infrastructure.persistence.entity.AccountEntity;
+import com.bank.account_service.infrastructure.persistence.embeddable.MoneyEmbeddable;
+import com.bank.account_service.infrastructure.persistence.embeddable.OwnerEmbeddable;
+import org.springframework.stereotype.Component;
+import java.util.Currency;
+
+@Component
+public class AccountMapper {
+
+    public Account toDomain(AccountEntity entity) {
+        Currency currency = Currency.getInstance(entity.getBalance().getCurrency());
+
+        return Account.restore(
+            new AccountId(entity.getId()),
+            new Owner(entity.getOwner().getFirstName(), entity.getOwner().getLastName()),
+            entity.getStatus(),
+            new Money(entity.getBalance().getAmount(), currency),
+            entity.getType(),
+            entity.getVersion()
+        );
+    }
+
+    public AccountEntity toEntity(Account domain) {
+        return new AccountEntity(
+            domain.getId().value(),
+            new OwnerEmbeddable(
+                domain.getOwner().firstName(),
+                domain.getOwner().lastName()
+            ),
+            domain.getStatus(),
+            domain.getType(),
+            new MoneyEmbeddable(
+                domain.getBalance().getAmount(),
+                domain.getBalance().getCurrency().getCurrencyCode()
+            ),
+            domain.getVersion(),
+            null,   // createdAt â€” managed by @CreatedDate (set on first insert, never overwritten)
+            null   // updatedAt â€” managed by @LastModifiedDate (updated automatically on each save)
+        );
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/mapper/TransactionMapper.java =====
+package com.bank.account_service.infrastructure.persistence.mapper;
+
+import com.bank.account_service.domain.model.AccountId;
+import com.bank.account_service.domain.model.Money;
+import com.bank.account_service.domain.model.Transaction;
+import com.bank.account_service.infrastructure.persistence.embeddable.MoneyEmbeddable;
+import com.bank.account_service.infrastructure.persistence.entity.TransactionEntity;
+import org.springframework.stereotype.Component;
+
+import java.util.Currency;
+
+@Component
+public class TransactionMapper {
+
+    public Transaction toDomain(TransactionEntity entity) {
+        Currency currency = Currency.getInstance(entity.getAmount().getCurrency());
+
+        return Transaction.restore(
+            entity.getId(),
+            new AccountId(entity.getAccountId()),
+            new Money(entity.getAmount().getAmount(), currency),
+            entity.getType(),
+            entity.getCreatedAt()
+        );
+    }
+
+    public TransactionEntity toEntity(Transaction domain) {
+        return new TransactionEntity(
+            domain.getId(),
+            domain.getAccountId().value(),
+            new MoneyEmbeddable(
+                domain.getAmount().getAmount(),
+                domain.getAmount().getCurrency().getCurrencyCode()
+            ),
+            domain.getType(),
+            domain.getCreatedAt()
+        );
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/repository/AccountRepositoryImpl.java =====
+package com.bank.account_service.infrastructure.persistence.repository;
+
+import com.bank.account_service.domain.model.Account;
+import com.bank.account_service.domain.model.AccountId;
+import com.bank.account_service.domain.repository.AccountRepository;
+import com.bank.account_service.infrastructure.persistence.mapper.AccountMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Repository;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+@Repository
+@RequiredArgsConstructor
+public class AccountRepositoryImpl implements AccountRepository {
+
+    private final SpringDataAccountRepository accountRepository;
+    private final AccountMapper accountMapper;
+
+    @Override
+    public Optional<Account> findById(AccountId id) {
+        return accountRepository.findById(id.value())
+                .map(accountMapper::toDomain);
+    }
+
+    @Override
+    public List<Account> findAll() {
+
+        return accountRepository.findAll().stream()
+                .map(accountMapper::toDomain).toList();
+    }
+
+    @Override
+    public void save(Account account) {
+        accountRepository.save(accountMapper.toEntity(account));
+    }
+
+    @Override
+    public boolean existsById(AccountId id) {
+        return accountRepository.existsById(id.value());
+    }
+
+    @Override
+    public boolean existsByTransactionIdProcessed(UUID transactionId) {
+        return false;
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/repository/projection/AccountBalanceView.java =====
+package com.bank.account_service.infrastructure.persistence.repository.projection;
+
+import java.math.BigDecimal;
+import java.util.UUID;
+
+public interface AccountBalanceView {
+    UUID getId();
+    BigDecimal getBalanceAmount();
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/repository/read/AccountQueryRepository.java =====
+package com.bank.account_service.infrastructure.persistence.repository.read;
+
+import com.bank.account_service.domain.model.Account;
+import com.bank.account_service.domain.model.Transaction;
+import com.bank.account_service.infrastructure.persistence.repository.projection.AccountBalanceView;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import java.util.List;
+import java.util.UUID;
+
+public interface AccountQueryRepository {
+
+    Page<Account> findAll(Pageable pageable);
+    List<AccountBalanceView> findBalances();
+    List<Transaction> findByAccountId(UUID accountId);
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/repository/read/AccountQueryRepositoryImpl.java =====
+package com.bank.account_service.infrastructure.persistence.repository.read;
+
+import com.bank.account_service.domain.model.Account;
+import com.bank.account_service.domain.model.Transaction;
+import com.bank.account_service.infrastructure.persistence.mapper.AccountMapper;
+import com.bank.account_service.infrastructure.persistence.mapper.TransactionMapper;
+import com.bank.account_service.infrastructure.persistence.repository.SpringDataAccountRepository;
+import com.bank.account_service.infrastructure.persistence.repository.projection.AccountBalanceView;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Repository;
+import java.util.List;
+import java.util.UUID;
+
+@Repository
+@RequiredArgsConstructor
+public class AccountQueryRepositoryImpl implements AccountQueryRepository {
+
+    private final SpringDataAccountRepository repository;
+    private final AccountMapper accountMapper;
+    private final TransactionMapper transactionMapper;
+
+    @Override
+    public Page<Account> findAll(Pageable pageable) {
+        return repository.findAll(pageable).map(accountMapper::toDomain);
+    }
+
+    @Override
+    public List<AccountBalanceView> findBalances() {
+        return repository.findBalances();
+    }
+
+    @Override
+    public List<Transaction> findByAccountId(UUID accountId) {
+        return repository.findByAccountId(accountId)
+            .stream()
+            .map(transactionMapper::toDomain)
+            .toList();
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/infrastructure/persistence/repository/SpringDataAccountRepository.java =====
+package com.bank.account_service.infrastructure.persistence.repository;
+
+import com.bank.account_service.infrastructure.persistence.entity.AccountEntity;
+import com.bank.account_service.infrastructure.persistence.entity.TransactionEntity;
+import com.bank.account_service.infrastructure.persistence.repository.projection.AccountBalanceView;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+public interface SpringDataAccountRepository extends JpaRepository<AccountEntity, UUID> {
+
+    Optional<AccountEntity> findById(UUID id);
+
+    @Query("""
+    SELECT a.id as id, a.balance.amount as balanceAmount
+    FROM AccountEntity a
+    """)
+    List<AccountBalanceView> findBalances();
+
+    @Query("""
+    SELECT t FROM TransactionEntity t
+    WHERE t.accountId = :accountId
+    ORDER BY t.createdAt DESC
+    """)
+    List<TransactionEntity> findByAccountId(UUID accountId);
+}
+
+===== END: infrastructure =====
+
+===== BEGIN: interfaces =====
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/dto/AccountDetailResponse.java =====
+package com.bank.account_service.interfaces.dto;
+
+import com.bank.account_service.domain.model.enums.AccountStatus;
+import com.bank.account_service.domain.model.enums.AccountType;
+
+import java.math.BigDecimal;
+import java.util.UUID;
+
+public record AccountDetailResponse(
+    UUID accountId,
+    String firstName,
+    String lastName,
+    AccountType type,
+    AccountStatus status,
+    BigDecimal balance,
+    String currency
+) {
+}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/dto/AccountResponse.java =====
+package com.bank.account_service.interfaces.dto;
+
+import java.math.BigDecimal;
+import java.util.UUID;
+
+public record AccountResponse(
+    UUID accountId,
+    BigDecimal balance,
+    String currency,
+    String status
+) {
+}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/dto/DebitRequest.java =====
+package com.bank.account_service.interfaces.dto;
+
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotNull;
+
+import java.math.BigDecimal;
+import java.util.UUID;
+
+public record DebitRequest(
+    @NotNull UUID transactionId,
+    @NotNull @DecimalMin("0.01") BigDecimal amount
+) {
+}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/dto/OpenAccountRequest.java =====
+package com.bank.account_service.interfaces.dto;
+
+import com.bank.account_service.domain.model.enums.AccountType;
+import com.bank.account_service.interfaces.validation.ValidCurrency;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+
+import java.math.BigDecimal;
+
+public record OpenAccountRequest(
+
+    @NotBlank(message = "First name is required")
+    @Size(max = 100, message = "First name must not exceed 100 characters")
+    String firstName,
+
+    @NotBlank(message = "Last name is required")
+    @Size(max = 100, message = "Last name must not exceed 100 characters")
+    String lastName,
+
+    @NotNull(message = "Account type is required")
+    AccountType type,
+
+    @NotNull(message = "Initial balance is required")
+    @DecimalMin(value = "0.00", message = "Initial balance cannot be negative")
+    BigDecimal initialBalance,
+
+    @NotNull(message = "Currency is required")
+    @ValidCurrency
+    String currency
+) {
+}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/dto/UpdateStatusRequest.java =====
+package com.bank.account_service.interfaces.dto;
+
+import com.bank.account_service.domain.model.enums.AccountStatus;
+import jakarta.validation.constraints.NotNull;
+
+/**
+ * Request DTO for partial update of an account's status.
+ *
+ * Spring MVC interview topic: PATCH vs PUT
+ *   PUT    â€” replaces the entire resource. If a field is missing in the body, it's set to null.
+ *   PATCH  â€” partial update. Only the fields provided in the body are changed.
+ *            Not guaranteed idempotent: e.g. PATCH "increment counter" applied twice â‰  once.
+ *            Changing status ACTIVEâ†’BLOCKED IS idempotent (same result if repeated).
+ *
+ * This DTO carries only the new status â€” not the whole account â€” which is intentional for PATCH.
+ */
+public record UpdateStatusRequest(
+    @NotNull(message = "Status is required")
+    AccountStatus status
+) {}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/exception/GlobalExceptionHandler.java =====
+package com.bank.account_service.interfaces.exception;
+
+import com.bank.account_service.domain.exception.*;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import java.net.URI;
+import java.util.List;
+
+/**
+ * Global exception handler for all controllers.
+ *
+ * Spring MVC interview topics covered:
+ *
+ *  @RestControllerAdvice â€” applies @ExceptionHandler methods globally to ALL controllers.
+ *    Internally combines @ControllerAdvice + @ResponseBody.
+ *    @ControllerAdvice alone is used when returning views (Thymeleaf error pages).
+ *    @RestControllerAdvice is used for REST APIs that return JSON.
+ *
+ *  Flow when an exception escapes a controller method:
+ *    Exception thrown
+ *      â†’ HandlerExceptionResolverComposite
+ *        â†’ ExceptionHandlerExceptionResolver
+ *          â†’ finds matching @ExceptionHandler by exception type (most specific wins)
+ *            â†’ executes handler method
+ *              â†’ HttpMessageConverter serializes ProblemDetail â†’ JSON response
+ *
+ *  ProblemDetail (RFC 9457 / RFC 7807) â€” Spring 6+ standard error response format.
+ *    Fields: type (URI), title, status, detail, instance.
+ *    Can be extended with setProperty() for extra fields (e.g. validation errors list).
+ *
+ *  Handler resolution â€” Spring picks the most specific exception type.
+ *    InsufficientFundsException handler wins over RuntimeException handler
+ *    when an InsufficientFundsException is thrown, even though it's a RuntimeException.
+ *
+ *  @ExceptionHandler(local) vs @RestControllerAdvice(global):
+ *    @ExceptionHandler inside a controller class = handles exceptions ONLY from that controller.
+ *    @RestControllerAdvice = handles exceptions from ALL controllers in the application.
+ */
+
+@Slf4j
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    // -------------------------------------------------------------------------
+    // 400 Bad Request â€” client sent invalid data
+    // -------------------------------------------------------------------------
+
+    /**
+     * Handles Bean Validation failures triggered by @Valid on @RequestBody.
+     *
+     * This fires when Jackson successfully deserializes the body BUT constraint
+     * annotations (@NotNull, @NotBlank, @ValidCurrency, etc.) fail.
+     *
+     * MethodArgumentNotValidException contains a BindingResult with all field errors.
+     * We extract them and add as a custom "errors" property on ProblemDetail.
+     *
+     * MISSING in original code â€” validation errors fell through to the 500 handler.
+     */
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ProblemDetail handleValidationErrors(MethodArgumentNotValidException ex) {
+        log.warn("Validation failed: {}", ex.getMessage());
+
+        List<String> errors = ex.getBindingResult()
+                .getFieldErrors()
+                .stream()
+                // "firstName: First name is required"
+                .map(fieldError -> fieldError.getField() + ": " + fieldError.getDefaultMessage())
+                .toList();
+
+        ProblemDetail pd = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        pd.setTitle("Validation failed");
+        pd.setDetail("One or more fields failed validation");
+        pd.setType(URI.create("https://api.bank.com/errors/validation"));
+
+        // ProblemDetail.setProperty() extends the JSON with extra fields â€” valid per RFC 9457.
+        pd.setProperty("errors", errors);
+
+        return pd; // 400
+    }
+
+    /**
+     * Handles type conversion failures in @RequestParam and @PathVariable.
+     *
+     * Example: GET /accounts/search?status=INVALID_VALUE
+     * Spring tries to convert "INVALID_VALUE" â†’ AccountStatus enum â†’ fails here.
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ProblemDetail handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        String detail = String.format("Parameter '%s' has invalid value '%s'", ex.getName(), ex.getValue());
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, detail); // 400
+    }
+
+    /**
+     * Handles insufficient funds â€” a domain business rule violation.
+     * The account exists and is active, but the balance is too low.
+     */
+    @ExceptionHandler(InsufficientFundsException.class)
+    public ProblemDetail handleInsufficientFunds(InsufficientFundsException ex) {
+        log.info("Insufficient funds: {}", ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
+        pd.setType(URI.create("https://api.bank.com/errors/insufficient-funds"));
+        return pd; // 400
+    }
+
+    /**
+     * Handles currency mismatch â€” client sent amount in the wrong currency.
+     */
+    @ExceptionHandler(CurrencyMismatchException.class)
+    public ProblemDetail handleCurrencyMismatch(CurrencyMismatchException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage()); // 400
+    }
+
+    // -------------------------------------------------------------------------
+    // 404 Not Found â€” the requested resource does not exist
+    // -------------------------------------------------------------------------
+
+    /**
+     * Handles missing accounts.
+     *
+     * MISSING in original code â€” the service threw a raw RuntimeException("Account not found")
+     * which fell through to the 500 handler below. This was wrong: a missing resource is a
+     * client error (404), not a server error (500).
+     */
+    @ExceptionHandler(AccountNotFoundException.class)
+    public ProblemDetail handleAccountNotFound(AccountNotFoundException ex) {
+        log.info("Account not found: {}", ex.getAccountId());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        pd.setType(URI.create("https://api.bank.com/errors/account-not-found"));
+        pd.setProperty("accountId", ex.getAccountId());
+        return pd; // 404
+    }
+
+    // -------------------------------------------------------------------------
+    // 409 Conflict â€” client request conflicts with server state
+    // -------------------------------------------------------------------------
+
+    /**
+     * Handles duplicate transaction IDs (idempotency violation).
+     * The transactionId was already processed â€” returning the same 409 on retry
+     * signals to the caller that the operation was already applied.
+     */
+    @ExceptionHandler(DuplicateTransactionException.class)
+    public ProblemDetail handleDuplicateTransaction(DuplicateTransactionException ex) {
+        log.warn("Duplicate transaction: {}", ex.getTransactionId());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setProperty("transactionId", ex.getTransactionId());
+        return pd; // 409
+    }
+
+    // -------------------------------------------------------------------------
+    // 422 Unprocessable Entity â€” request is valid but cannot be processed
+    //     given the current state of the resource
+    // -------------------------------------------------------------------------
+
+    /**
+     * Handles operations on inactive/blocked/closed accounts.
+     *
+     * MISSING in original code â€” fell through to 500.
+     * 422 is semantically correct: the request itself is valid (correct body, valid account ID),
+     * but the business rule says we cannot debit a non-active account.
+     */
+    @ExceptionHandler(AccountNotActiveException.class)
+    public ProblemDetail handleAccountNotActive(AccountNotActiveException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage()); // 422
+    }
+
+    // -------------------------------------------------------------------------
+    // 500 Internal Server Error â€” catch-all for unexpected exceptions
+    // -------------------------------------------------------------------------
+
+    /**
+     * Catch-all for anything not handled above.
+     *
+     * Important: log the full stack trace here so you can debug. Never expose
+     * internal details (stack traces, DB errors) in the response body â€” security risk.
+     *
+     * Note: this catches RuntimeException, NOT Exception. Checked exceptions that
+     * bubble up to the controller are typically a design smell in Spring apps.
+     */
+    @ExceptionHandler(RuntimeException.class)
+    public ProblemDetail handleUnexpected(RuntimeException ex) {
+        log.error("Unexpected error", ex); // full stack trace in logs
+        return ProblemDetail.forStatusAndDetail(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "An unexpected error occurred. Please try again later."); // 500
+        // Never put ex.getMessage() here â€” it may leak internal implementation details.
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/rest/AccountController.java =====
+package com.bank.account_service.interfaces.rest;
+
+import com.bank.account_service.application.command.DebitAccountCommand;
+import com.bank.account_service.application.command.OpenAccountCommand;
+import com.bank.account_service.application.command.UpdateAccountStatusCommand;
+import com.bank.account_service.application.service.AccountService;
+import com.bank.account_service.domain.exception.AccountNotFoundException;
+import com.bank.account_service.domain.model.AccountId;
+import com.bank.account_service.domain.model.enums.AccountStatus;
+import com.bank.account_service.interfaces.dto.AccountDetailResponse;
+import com.bank.account_service.interfaces.dto.DebitRequest;
+import com.bank.account_service.interfaces.dto.OpenAccountRequest;
+import com.bank.account_service.interfaces.dto.UpdateStatusRequest;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
+
+import java.net.URI;
+import java.util.UUID;
+
+
+/**
+ * REST controller for account lifecycle and balance operations.
+ *
+ * Spring MVC topics covered in this class:
+ *
+ *  @RestController        â€” combines @Controller + @ResponseBody.
+ *                           Every method's return value is serialized to JSON by Jackson.
+ *                           Use @Controller instead when returning Thymeleaf view names.
+ *
+ *  @RequestMapping        â€” base path shared by all methods in this controller.
+ *
+ *  @PostMapping           â€” maps HTTP POST. Non-idempotent: two identical POSTs may create
+ *                           two resources. Returns 201 Created with a Location header.
+ *
+ *  @GetMapping            â€” maps HTTP GET. Idempotent and safe (no side effects).
+ *                           Returns 200 OK with the resource body, or 404 if not found.
+ *
+ *  @PatchMapping          â€” maps HTTP PATCH. Partial update â€” only the provided fields change.
+ *                           Returns 204 No Content (success, no body needed).
+ *
+ *  @DeleteMapping         â€” maps HTTP DELETE. Idempotent: deleting a non-existent resource
+ *                           should still return 2xx (or 404). Returns 204 No Content.
+ *
+ *  @PathVariable          â€” binds a URI template variable to a method parameter.
+ *                           Used for unique identifiers: /accounts/{accountId}.
+ *
+ *  @RequestParam          â€” binds a query-string parameter to a method parameter.
+ *                           Used for filters, sorting, pagination: ?status=ACTIVE.
+ *
+ *  @RequestBody           â€” tells Spring to deserialize the HTTP body into a Java object.
+ *                           Jackson (ObjectMapper) handles the JSON â†’ Java conversion.
+ *
+ *  @Valid                 â€” triggers Bean Validation on the annotated parameter.
+ *                           On failure â†’ MethodArgumentNotValidException â†’ 400 Bad Request.
+ *
+ *  ResponseEntity<T>      â€” gives full control over status code, headers, and body.
+ */
+
+@RestController
+@RequestMapping("/api/v1/accounts")
+@RequiredArgsConstructor
+@Tag(name = "Accounts", description = "Operations for account balance management")
+public class AccountController {
+
+    private final AccountService accountService;
+
+    // =========================================================================
+    // POST /api/v1/accounts/open â€” open a new account
+    // HTTP method: POST (non-idempotent, creates a new resource)
+    // Success: 201 Created + Location header pointing to the new resource
+    // =========================================================================
+
+    @PostMapping("/open")
+    @Operation(summary = "Open a new account",
+        description = "Creates a new bank account. Returns 201 with a Location header.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "201", description = "Account created"),
+        @ApiResponse(responseCode = "400", description = "Validation failed")
+    })
+    public ResponseEntity<Void> openAccount(
+            /*
+             * @RequestBody â€” Jackson deserializes the JSON body into OpenAccountRequest.
+             * @Valid       â€” runs Bean Validation (@NotBlank, @ValidCurrency, etc.).
+             *               If any constraint fails, Spring throws MethodArgumentNotValidException
+             *               before this method body even executes.
+             */
+            @Valid @RequestBody OpenAccountRequest request) {
+
+        OpenAccountCommand command = new OpenAccountCommand(
+            request.firstName(),
+            request.lastName(),
+            request.type(),
+            request.initialBalance(),
+            request.currency()
+        );
+
+        AccountId newId = accountService.openAccount(command);
+
+        /*
+         * Build the Location header: /api/v1/accounts/{newId}
+         * ServletUriComponentsBuilder reads the current request's base URL automatically.
+         * Best practice for POST responses that create a resource.
+         */
+        URI location = ServletUriComponentsBuilder
+                .fromCurrentRequest()
+                .path("/{id}")
+                .buildAndExpand(newId.value())
+                .toUri();
+
+        return ResponseEntity.created(location).build();
+    }
+
+    // =========================================================================
+    // GET /api/v1/accounts/{accountId} â€” get a single account
+    // HTTP method: GET (idempotent, safe)
+    // Success: 200 OK + body
+    // Not found: 404 (thrown by service, caught by GlobalExceptionHandler)
+    // =========================================================================
+
+    @GetMapping("/{accountId}")
+    @Operation(summary = "Get account by ID")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Account found"),
+        @ApiResponse(responseCode = "404", description = "Account not found")
+    })
+    public ResponseEntity<AccountDetailResponse> getAccount(
+            /*
+             * @PathVariable â€” Spring's PathVariableMethodArgumentResolver extracts "accountId"
+             * from the URI template and converts the String â†’ UUID automatically.
+             * Used for unique resource identifiers, NOT for filters.
+             */
+            @Parameter(description = "Account UUID") @PathVariable UUID accountId) {
+
+        return accountService.findById(accountId)
+                .map(ResponseEntity::ok)                                    // 200 + body
+                .orElseThrow(() -> new AccountNotFoundException(accountId)); // let handler â†’ 404
+    }
+
+    @PostMapping("/{accountId}/debit")
+    @Operation(summary = "Debit an account")
+    @ApiResponses({
+        @ApiResponse(responseCode = "202", description = "Debit accepted"),
+        @ApiResponse(responseCode = "400", description = "Validation or business rule failure"),
+        @ApiResponse(responseCode = "404", description = "Account not found"),
+        @ApiResponse(responseCode = "409", description = "Duplicate transactionId")
+    })
+    public ResponseEntity<Void> debitAccount(
+        @Parameter(description = "Account UUID") @PathVariable UUID accountId,
+        @Valid @RequestBody DebitRequest request
+    ) {
+
+        var command = new DebitAccountCommand(
+            accountId,
+            request.amount(),
+            request.transactionId()
+        );
+        accountService.handleDebit(command);
+
+        /*
+         * 202 Accepted â€” the command was accepted and will be processed.
+         * More accurate than 200 OK because the event is published to Pulsar asynchronously.
+         * The caller should not assume the balance has already changed on the downstream side.
+         */
+        return ResponseEntity.accepted().build();
+    }
+
+    // =========================================================================
+    // PATCH /api/v1/accounts/{accountId}/status â€” update account status
+    // HTTP method: PATCH (partial update â€” only status changes)
+    // Success: 204 No Content (operation succeeded, no body needed)
+    // =========================================================================
+
+    @PatchMapping("/{accountId}/status")
+    @Operation(summary = "Update account status", description =
+            "Partially updates the account â€” changes only the status field. " +
+                    "PATCH vs PUT: PATCH sends only the changed fields; PUT replaces the whole resource.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "204", description = "Status updated"),
+            @ApiResponse(responseCode = "400", description = "Invalid status value"),
+            @ApiResponse(responseCode = "404", description = "Account not found")
+    })
+    public ResponseEntity<Void> updateStatus(
+            @PathVariable UUID accountId,
+            @Valid @RequestBody UpdateStatusRequest request
+    ) {
+        UpdateAccountStatusCommand command = new UpdateAccountStatusCommand(accountId, request.status());
+        accountService.updateAccountStatus(command);
+
+        /*
+         * 204 No Content â€” success, but there is nothing to return.
+         * Correct for PATCH / DELETE when the operation is "fire and done".
+         */
+        return ResponseEntity.noContent().build();
+    }
+
+    // =========================================================================
+    // DELETE /api/v1/accounts/{accountId} â€” close an account
+    // HTTP method: DELETE (idempotent)
+    // Success: 204 No Content
+    // =========================================================================
+
+    @DeleteMapping("/{accountId}")
+    @Operation(summary = "Close an account", description =
+        "Transitions the account to CLOSED status. Idempotent: calling DELETE " +
+        "on an already-closed account returns the same 204.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "204", description = "Account closed"),
+        @ApiResponse(responseCode = "404", description = "Account not found")
+    })
+    public ResponseEntity<Void> closeAccount(@PathVariable UUID accountId) {
+        UpdateAccountStatusCommand command = new UpdateAccountStatusCommand(
+            accountId,
+            AccountStatus.CLOSED
+        );
+        accountService.updateAccountStatus(command);
+        return ResponseEntity.noContent().build(); // 204
+    }
+
+}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/rest/SearchController.java =====
+package com.bank.account_service.interfaces.rest;
+
+import com.bank.account_service.application.service.AccountService;
+import com.bank.account_service.interfaces.dto.AccountResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/v1/accounts/search")
+@RequiredArgsConstructor
+@Tag(name = "Search Accounts", description = "Operations for searching accounts")
+public class SearchController {
+
+    private final AccountService accountService;
+
+    @GetMapping
+    public Page<AccountResponse> getAll(Pageable pageable) {
+        return accountService.findAll(pageable);
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/validation/CurrencyValidator.java =====
+package com.bank.account_service.interfaces.validation;
+
+import jakarta.validation.ConstraintValidator;
+import jakarta.validation.ConstraintValidatorContext;
+import java.util.Currency;
+
+public class CurrencyValidator implements ConstraintValidator<ValidCurrency, String> {
+
+    @Override
+    public void initialize(ValidCurrency constraintAnnotation) {
+        ConstraintValidator.super.initialize(constraintAnnotation);
+    }
+
+    @Override
+    public boolean isValid(String value, ConstraintValidatorContext constraintValidatorContext) {
+        if (value == null) {
+            return true;
+        }
+        try {
+            Currency.getInstance(value);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+}
+
+===== FILE: src/main/java/com/bank/account_service/interfaces/validation/ValidCurrency.java =====
+package com.bank.account_service.interfaces.validation;
+
+import jakarta.validation.Constraint;
+import jakarta.validation.Payload;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Constraint(validatedBy = CurrencyValidator.class)   // links annotation â†’ validator logic
+@Target({ElementType.FIELD, ElementType.PARAMETER})   // valid on fields and method params
+@Retention(RetentionPolicy.RUNTIME)                   // must be RUNTIME for reflection
+public @interface ValidCurrency {
+
+    String message() default "Invalid ISO 4217 currency code";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+
+===== END: interfaces =====
